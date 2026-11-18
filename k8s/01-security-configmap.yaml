@@ -1,0 +1,27 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: security-configmap
+  namespace: practica-s12
+  labels:
+    app.kubernetes.io/name: security-configmap
+    app.kubernetes.io/part-of: practica-s12
+    tier: backend
+data:
+  # =========================================================================
+  # CONFIGURACIÓN OPERATIVA DEL BACKEND (Datos Públicos No Sensibles)
+  # =========================================================================
+  APP_NAME: "api-backend-segura"
+  APP_PORT: "8080"
+  APP_ENV: "production"
+  LOG_LEVEL: "INFO"
+
+  # =========================================================================
+  # RESOLUCIÓN ESCENARIO B (Troubleshooting de Red/Conectividad):
+  # Durante la falla, DB_PORT contenía '27018', provocando error de conexión
+  # rechazada (Connection Refused). El puerto interno correcto del servicio
+  # de base de datos MongoDB es 27017.
+  # =========================================================================
+  DB_HOST: "db-service"
+  DB_PORT: "27017"
+  DB_NAME: "inventario_db"

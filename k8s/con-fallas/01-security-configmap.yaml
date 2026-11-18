@@ -1,0 +1,22 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: security-configmap
+  namespace: practica-s12
+  labels:
+    app.kubernetes.io/name: security-configmap
+    app.kubernetes.io/part-of: practica-s12
+    tier: backend
+data:
+  APP_NAME: "api-backend-segura"
+  APP_PORT: "8080"
+  APP_ENV: "production"
+  LOG_LEVEL: "INFO"
+
+  # =========================================================================
+  # FALLA ESCENARIO B (Intencional para Captura del "ANTES"):
+  # Se coloca el puerto erróneo 27018 (el correcto de MongoDB es 27017)
+  # =========================================================================
+  DB_HOST: "db-service"
+  DB_PORT: "27018"
+  DB_NAME: "inventario_db"

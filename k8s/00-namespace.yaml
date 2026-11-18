@@ -1,0 +1,18 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: practica-s12
+  labels:
+    name: practica-s12
+    app.kubernetes.io/name: practica-s12
+    app.kubernetes.io/part-of: laboratorio-seguridad-troubleshooting
+    curso: orquestacion-y-automatizacion
+    # =========================================================================
+    # HARDENING: POD SECURITY STANDARDS (PSS) ADMISSION CONTROLLER
+    # =========================================================================
+    # Se aplican las directivas Restricted para forzar que cualquier Pod desplegado
+    # cumpla obligatoriamente con usuarios sin privilegios (non-root) y privilegios mínimos.
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted

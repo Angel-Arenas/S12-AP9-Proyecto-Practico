@@ -1,0 +1,187 @@
+# =============================================================================
+# MANIFIESTO CON FALLAS ACTIVADAS (Para capturar la Evidencia 1 - "ANTES")
+# Contiene Escenario A (key: DB_PASSWD) y Escenario C (path: /healhtz)
+# =============================================================================
+
+# 1. Base de Datos (MongoDB)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: db-deployment
+  namespace: practica-s12
+  labels:
+    app: db-backend
+    tier: database
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: db-backend
+  template:
+    metadata:
+      labels:
+        app: db-backend
+        tier: database
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: mongodb
+          image: mongo:7.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: mongodb
+              containerPort: 27017
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            runAsUser: 999
+            seccompProfile:
+              type: RuntimeDefault
+            capabilities:
+              drop:
+                - ALL
+          env:
+            - name: MONGO_INITDB_ROOT_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: db-secret
+                  key: MONGO_INITDB_ROOT_USERNAME
+            - name: MONGO_INITDB_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: db-secret
+                  key: MONGO_INITDB_ROOT_PASSWORD
+          volumeMounts:
+            - name: mongo-data
+              mountPath: /data/db
+            - name: tmp-dir
+              mountPath: /tmp
+      volumes:
+        - name: mongo-data
+          emptyDir: {}
+        - name: tmp-dir
+          emptyDir: {}
+
+---
+# 2. Backend con Fallas Introducidas
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: app-deployment
+  namespace: practica-s12
+  labels:
+    app: backend-app
+    tier: backend
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: backend-app
+  template:
+    metadata:
+      labels:
+        app: backend-app
+        tier: backend
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: backend-app
+          image: python:3.11-alpine
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 10001
+            seccompProfile:
+              type: RuntimeDefault
+            capabilities:
+              drop:
+                - ALL
+          envFrom:
+            - configMapRef:
+                name: security-configmap
+          env:
+            - name: DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: db-secret
+                  key: DB_USER
+            # =================================================================
+            # ❌ FALLA ESCENARIO A: Clave inexistente 'DB_PASSWD'
+            # Provoca que el Pod falle al iniciar (CrashLoopBackOff)
+            # =================================================================
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: db-secret
+                  key: DB_PASSWD
+          command: ["python", "-u", "-c"]
+          args:
+            - |
+              import http.server, os, sys, socket, json, time
+              port = int(os.environ.get("APP_PORT", 8080))
+              db_host = os.environ.get("DB_HOST", "db-service")
+              db_port = int(os.environ.get("DB_PORT", 27017))
+              db_user = os.environ.get("DB_USER")
+              db_pass = os.environ.get("DB_PASSWORD")
+
+              if not db_pass or not db_user:
+                  sys.stderr.write("[FATAL ERROR - CONFIG] Credenciales ausentes. CrashLoopBackOff\n")
+                  sys.exit(1)
+
+              class APIHandler(http.server.BaseHTTPRequestHandler):
+                  def do_GET(self):
+                      if self.path in ['/healthz', '/actuator/health']:
+                          self.send_response(200)
+                          self.send_header('Content-Type', 'application/json')
+                          self.end_headers()
+                          self.wfile.write(b'{"status":"UP"}\n')
+                          return
+                      self.send_response(404)
+                      self.end_headers()
+                      self.wfile.write(b'Not Found\n')
+
+              server = http.server.HTTPServer(('0.0.0.0', port), APIHandler)
+              server.serve_forever()
+          # ===================================================================
+          # ❌ FALLA ESCENARIO C: Endpoint erróneo '/healhtz' (Typo)
+          # Responde 404 y kubelet matará el contenedor en bucle (Restarts)
+          # ===================================================================
+          livenessProbe:
+            httpGet:
+              path: /healhtz
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            failureThreshold: 2
+          readinessProbe:
+            httpGet:
+              path: /healhtz
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            failureThreshold: 2
+          volumeMounts:
+            - name: tmp-dir
+              mountPath: /tmp
+      volumes:
+        - name: tmp-dir
+          emptyDir: {}

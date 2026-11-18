@@ -1,0 +1,64 @@
+# =============================================================================
+# EXPOSICIÓN DE SERVICIOS: CLUSTERIP (Base de Datos) Y NODEPORT (Backend)
+# Requisito explícito: Exposición vía NodePort en AWS EC2 (Sin AWS ALB / ELB)
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# 1. SERVICIO DE BASE DE DATOS (MongoDB - Solo Tráfico Interno)
+# -----------------------------------------------------------------------------
+apiVersion: v1
+kind: Service
+metadata:
+  name: db-service
+  namespace: practica-s12
+  labels:
+    app: db-backend
+    tier: database
+spec:
+  type: ClusterIP       # Aislamiento estricto: inaccesible desde el exterior del clúster
+  selector:
+    app: db-backend
+  ports:
+    - name: mongodb
+      protocol: TCP
+      port: 27017       # Puerto de escucha del servicio interno
+      targetPort: 27017 # Puerto del contenedor de MongoDB
+
+---
+# -----------------------------------------------------------------------------
+# 2. SERVICIO DEL BACKEND (Exposición Externa mediante NodePort)
+# -----------------------------------------------------------------------------
+apiVersion: v1
+kind: Service
+metadata:
+  name: app-service
+  namespace: practica-s12
+  labels:
+    app: backend-app
+    tier: backend
+spec:
+  type: NodePort        # Exposición directa en el puerto del nodo de AWS EC2 (sin coste de ALB)
+  selector:
+    app: backend-app
+  ports:
+    - name: http
+      protocol: TCP
+      port: 8080        # Puerto interno del servicio
+      targetPort: 8080  # Puerto donde escucha la aplicación en el contenedor
+      nodePort: 31080   # Puerto estático en el nodo EC2 (rango permitido: 30000-32767)
+
+# =============================================================================
+# 🔐 CONFIGURACIÓN REQUERIDA DE AWS VPC SECURITY GROUP:
+# =============================================================================
+# Para que el tráfico llegue al NodePort desde Internet o tu máquina de desarrollo,
+# debes registrar la siguiente regla de entrada (Inbound Rule) en el Security Group
+# de la instancia EC2 donde corre el nodo de Kubernetes:
+#
+# Tipo:             Custom TCP (TCP personalizado)
+# Protocolo:        TCP
+# Rango de puertos: 31080
+# Origen:           0.0.0.0/0 (Cualquier origen) o <TU_IP_PUBLICA>/32
+# Descripción:      Acceso al Backend Seguro NodePort S12
+#
+# URL de acceso:    http://<IP_PUBLICA_EC2>:31080/
+# =============================================================================

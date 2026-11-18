@@ -1,0 +1,306 @@
+# =============================================================================
+# ARQUITECTURA DISTRIBUIDA: CAPA DE DATOS (MongoDB) Y CAPA DE APLICACIÓN (Backend)
+# Hardening de Seguridad: runAsNonRoot, runAsUser 10001, readOnlyRootFilesystem
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# 1. DEPLOYMENT DE BASE DE DATOS (MongoDB)
+# -----------------------------------------------------------------------------
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: db-deployment
+  namespace: practica-s12
+  labels:
+    app: db-backend
+    tier: database
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: db-backend
+  template:
+    metadata:
+      labels:
+        app: db-backend
+        tier: database
+    spec:
+      # Hardening a nivel de Pod para la base de datos
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999        # UID no privilegiado oficial de MongoDB
+        runAsGroup: 999
+        fsGroup: 999
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: mongodb
+          image: mongo:7.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: mongodb
+              containerPort: 27017
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            runAsUser: 999
+            seccompProfile:
+              type: RuntimeDefault
+            capabilities:
+              drop:
+                - ALL
+          env:
+            - name: MONGO_INITDB_ROOT_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: db-secret
+                  key: MONGO_INITDB_ROOT_USERNAME
+            - name: MONGO_INITDB_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: db-secret
+                  key: MONGO_INITDB_ROOT_PASSWORD
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          volumeMounts:
+            - name: mongo-data
+              mountPath: /data/db
+            - name: tmp-dir
+              mountPath: /tmp
+          livenessProbe:
+            tcpSocket:
+              port: 27017
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          readinessProbe:
+            tcpSocket:
+              port: 27017
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 2
+      volumes:
+        - name: mongo-data
+          emptyDir: {}
+        - name: tmp-dir
+          emptyDir: {}
+
+---
+# -----------------------------------------------------------------------------
+# 2. DEPLOYMENT DEL BACKEND SEGURO (Alta Disponibilidad: 2 Réplicas)
+# -----------------------------------------------------------------------------
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: app-deployment
+  namespace: practica-s12
+  labels:
+    app: backend-app
+    tier: backend
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: backend-app
+  template:
+    metadata:
+      labels:
+        app: backend-app
+        tier: backend
+    spec:
+      # =======================================================================
+      # PASO 2: HARDENING DE SEGURIDAD (SecurityContext a nivel de Pod)
+      # =======================================================================
+      securityContext:
+        runAsNonRoot: true       # Impide estrictamente la ejecución como root (UID 0)
+        runAsUser: 10001         # Forzado a UID 10001 no privilegiado
+        runAsGroup: 10001        # GID no privilegiado
+        fsGroup: 10001           # Permisos de grupo para volúmenes montados
+        seccompProfile:
+          type: RuntimeDefault   # Bloquea llamadas al sistema potencialmente peligrosas
+      containers:
+        - name: backend-app
+          image: python:3.11-alpine
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          # ===================================================================
+          # PASO 2: HARDENING DE SEGURIDAD (SecurityContext a nivel Contenedor)
+          # ===================================================================
+          securityContext:
+            allowPrivilegeEscalation: false  # Prohíbe escalamiento de privilegios (setuid/sudo)
+            readOnlyRootFilesystem: true     # Sistema de archivos de solo lectura
+            runAsNonRoot: true               # Validación en tiempo de ejecución del contenedor
+            runAsUser: 10001                 # UID específico 10001
+            seccompProfile:
+              type: RuntimeDefault
+            capabilities:
+              drop:
+                - ALL                        # Se revocan todas las capacidades Linux (CAP_SYS_ADMIN, etc.)
+          envFrom:
+            - configMapRef:
+                name: security-configmap
+          env:
+            - name: DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: db-secret
+                  key: DB_USER
+            # =================================================================
+            # RESOLUCIÓN ESCENARIO A (Troubleshooting de Configuración):
+            # Durante la falla, referenciaba la clave errónea 'DB_PASSWD',
+            # causando CrashLoopBackOff. Se corrigió a 'DB_PASSWORD'.
+            # =================================================================
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: db-secret
+                  key: DB_PASSWORD
+          # Servidor HTTP nativo en Python que comprueba seguridad y conectividad con la BD
+          command: ["python", "-u", "-c"]
+          args:
+            - |
+              import http.server
+              import os, sys, socket, json, time
+
+              port = int(os.environ.get("APP_PORT", 8080))
+              db_host = os.environ.get("DB_HOST", "db-service")
+              db_port = int(os.environ.get("DB_PORT", 27017))
+              db_user = os.environ.get("DB_USER")
+              db_pass = os.environ.get("DB_PASSWORD")
+              app_name = os.environ.get("APP_NAME", "backend-seguro")
+              app_env = os.environ.get("APP_ENV", "production")
+
+              # Validación de configuración estricta (Escenario A)
+              if not db_pass or not db_user:
+                  sys.stderr.write("[FATAL ERROR - CONFIG] Credenciales de base de datos ausentes. Verifique Secret db-secret.\n")
+                  sys.exit(1)
+
+              print(f"[INFO] Iniciando {app_name} en puerto {port} como UID={os.getuid()} GID={os.getgid()}...")
+
+              class APIHandler(http.server.BaseHTTPRequestHandler):
+                  def do_GET(self):
+                      # =======================================================
+                      # SONDAS DE SALUD (Liveness y Readiness)
+                      # =======================================================
+                      if self.path in ['/healthz', '/actuator/health']:
+                          self.send_response(200)
+                          self.send_header('Content-Type', 'application/json')
+                          self.end_headers()
+                          self.wfile.write(json.dumps({
+                              "status": "UP",
+                              "liveness": "OK",
+                              "readiness": "READY",
+                              "timestamp": int(time.time()),
+                              "security": {
+                                  "nonRoot": True,
+                                  "uid": os.getuid()
+                              }
+                          }).encode('utf-8'))
+                          return
+
+                      # =======================================================
+                      # ENDPOINT DE DIAGNÓSTICO Y CONECTIVIDAD (Escenario B)
+                      # =======================================================
+                      if self.path in ['/', '/api/status', '/api/info']:
+                          db_status = "UNKNOWN"
+                          db_latency_ms = None
+                          try:
+                              t0 = time.time()
+                              s = socket.create_connection((db_host, db_port), timeout=2.5)
+                              s.close()
+                              db_status = "CONNECTED"
+                              db_latency_ms = round((time.time() - t0) * 1000, 2)
+                          except Exception as err:
+                              db_status = f"FAILED: {err}"
+
+                          http_code = 200 if db_status == "CONNECTED" else 503
+                          self.send_response(http_code)
+                          self.send_header('Content-Type', 'application/json')
+                          self.end_headers()
+
+                          payload = {
+                              "aplicacion": app_name,
+                              "entorno": app_env,
+                              "namespace": "practica-s12",
+                              "pod_hostname": socket.gethostname(),
+                              "usuario_proceso": {
+                                  "uid": os.getuid(),
+                                  "gid": os.getgid(),
+                                  "es_root": (os.getuid() == 0),
+                                  "cumple_runAsNonRoot": (os.getuid() == 10001)
+                              },
+                              "hardening_seguridad": {
+                                  "runAsNonRoot": True,
+                                  "runAsUser": 10001,
+                                  "readOnlyRootFilesystem": True,
+                                  "privilegeEscalationAllowed": False
+                              },
+                              "comunicacion_base_datos": {
+                                  "host_servicio": db_host,
+                                  "puerto_interno": db_port,
+                                  "estado": db_status,
+                                  "latencia_ms": db_latency_ms
+                              }
+                          }
+                          self.wfile.write(json.dumps(payload, indent=2).encode('utf-8'))
+                          return
+
+                      # Cualquier ruta no configurada responde 404 (provoca falla si la sonda apunta mal)
+                      self.send_response(404)
+                      self.send_header('Content-Type', 'application/json')
+                      self.end_headers()
+                      self.wfile.write(json.dumps({"error": "Ruta no encontrada", "path": self.path}).encode('utf-8'))
+
+                  def log_message(self, format, *args):
+                      sys.stdout.write(f"[HTTP] {self.address_string()} - {format % args}\n")
+
+              server = http.server.HTTPServer(('0.0.0.0', port), APIHandler)
+              print(f"[INFO] Servidor listo y escuchando en 0.0.0.0:{port}")
+              server.serve_forever()
+          # ===================================================================
+          # PASO 3 - ESCENARIO C: SONDAS DE SALUD (Liveness y Readiness)
+          # Durante la falla, apuntaba a '/healhtz' (HTTP 404 -> Reinicios).
+          # Corregido canónicamente a '/healthz' en puerto 8080.
+          # ===================================================================
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 2
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          volumeMounts:
+            # Requerido por readOnlyRootFilesystem: true para permitir operaciones
+            # temporales de Linux sin violar el aislamiento de solo lectura de la raíz.
+            - name: tmp-dir
+              mountPath: /tmp
+      volumes:
+        - name: tmp-dir
+          emptyDir: {}
